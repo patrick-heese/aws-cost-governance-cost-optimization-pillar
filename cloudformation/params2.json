@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "ApproverPrincipal",
+    "ParameterValue": "AdminUser"
+  },
+  {
+    "ParameterKey": "NotificationEmail",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "ProjectTagValue",
+    "ParameterValue": "CostGovernance"
+  }
+]

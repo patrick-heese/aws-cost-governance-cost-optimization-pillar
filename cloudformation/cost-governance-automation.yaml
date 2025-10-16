@@ -1,0 +1,329 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cost Governance Automation: SSM cleanup runbook, SNS alerts (approval + completion),
+  EventBridge post-approval notifications, and a least-privilege execution role.
+  The runbook is executed manually from the console.
+
+Parameters:
+  ApproverPrincipal:
+    Type: String
+    Description: >
+      ARN (preferred) or email of the principal who will approve cleanup
+      (e.g., arn:aws:iam::<AccountId>:user/AdminUser). Used by the aws:approve step.
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: (Optional) Email to subscribe to the Automation-CostGovernanceAlerts SNS topic.
+    AllowedPattern: >-
+      ^$|^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$
+
+  ProjectTagValue:
+    Type: String
+    Default: CostGovernance
+    Description: >
+      Value of the Project tag used to scope deletions (e.g., Project=CostGovernance).
+      The runbook only deletes EBS volumes with this tag value (IAM condition).
+
+Conditions:
+  HasEmail:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: NotificationEmail
+          - ''
+
+Resources:
+  # SNS Topic
+  CostGovernanceAlerts:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: Automation-CostGovernanceAlerts
+      DisplayName: Cost Governance Alerts
+
+  # Optional email subscription
+  CostGovernanceEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn:
+        Ref: CostGovernanceAlerts
+      Protocol: email
+      Endpoint:
+        Ref: NotificationEmail
+
+  # Topic policy so EventBridge can publish follow-up notifications
+  CostGovernanceAlertsPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - Ref: CostGovernanceAlerts
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridgeToPublishFollowup
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource:
+              Ref: CostGovernanceAlerts
+            Condition:
+              StringEquals:
+                AWS:SourceArn:
+                  Fn::GetAtt:
+                    - ApprovalFollowupRule
+                    - Arn
+
+  # Execution role assumed by SSM Automation during runbook steps
+  AutomationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CostGovernance-AutomationRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: cost-governance-automation-exec
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read-only EC2 describe calls
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeAddresses
+                Resource: "*"
+
+              # Delete unattached volumes scoped by Project tag
+              - Effect: Allow
+                Action:
+                  - ec2:DeleteVolume
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    ec2:ResourceTag/Project:
+                      Ref: ProjectTagValue
+
+              # Release unassociated EIPs (no fine-grained resource ARN)
+              - Effect: Allow
+                Action:
+                  - ec2:ReleaseAddress
+                Resource: "*"
+
+              # Publish notifications to our SNS topic (approval + completion)
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  Ref: CostGovernanceAlerts
+
+  # SSM Automation Runbook
+  CleanupAutomationDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: CostGovernance-Cleanup
+      DocumentType: Automation
+      DocumentFormat: JSON
+      UpdateMethod: NewVersion   # publish new versions instead of replacement
+      Content:
+        description: Automates cleanup of unattached EBS volumes and unassociated Elastic IPs.
+        schemaVersion: '0.3'
+        assumeRole: "{{ AutomationAssumeRole }}"
+        parameters:
+          AutomationAssumeRole:
+            type: String
+            description: IAM role that allows Automation to clean up resources
+            default:
+              Fn::GetAtt:
+                - AutomationExecutionRole
+                - Arn
+          Approver:
+            type: String
+            description: Email or ARN of the approver for cleanup actions
+            default:
+              Ref: ApproverPrincipal
+          ProjectTagValueParam:
+            type: String
+            description: Project tag value used in discovery filters (volumes)
+            default:
+              Ref: ProjectTagValue
+
+        mainSteps:
+          # Discover volumes and EIPs in a single step (robust outputs; $.Payload.*)
+          - name: DiscoverTargets
+            action: aws:executeScript
+            inputs:
+              Runtime: python3.11
+              Handler: handler
+              InputPayload:
+                projectTag: "{{ ProjectTagValueParam }}"
+              Script: |
+                import boto3
+                def handler(event, context):
+                    ec2 = boto3.client('ec2')
+                    project = event.get("projectTag")
+
+                    # Volumes: available + tag:Project=<value> (if provided)
+                    vol_filters = [{'Name': 'status', 'Values': ['available']}]
+                    if project:
+                        vol_filters.append({'Name': 'tag:Project', 'Values': [project]})
+                    vresp = ec2.describe_volumes(Filters=vol_filters)
+                    vols = vresp.get('Volumes', [])
+                    vol_ids = [v['VolumeId'] for v in vols]
+
+                    # EIPs: VPC domain, unassociated
+                    aresp = ec2.describe_addresses(Filters=[{'Name': 'domain', 'Values': ['vpc']}])
+                    addrs = aresp.get('Addresses', [])
+                    eip_ids = [a['AllocationId'] for a in addrs if not a.get('AssociationId')]
+
+                    return {
+                        "VolumeIds": vol_ids,
+                        "EipAllocationIds": eip_ids
+                    }
+            outputs:
+              - Name: VolumeIds
+                Selector: "$.Payload.VolumeIds"
+                Type: StringList
+              - Name: EipAllocationIds
+                Selector: "$.Payload.EipAllocationIds"
+                Type: StringList
+
+          # Build a String for aws:approve message (avoid StringList->String issues)
+          - name: BuildApprovalMessage
+            action: aws:executeScript
+            inputs:
+              Runtime: python3.11
+              Handler: handler
+              InputPayload:
+                volumes: "{{ DiscoverTargets.VolumeIds }}"
+                eips: "{{ DiscoverTargets.EipAllocationIds }}"
+              Script: |
+                def _fmt(items):
+                    return ", ".join(items) if items else "none"
+                def handler(event, context):
+                    vols = event.get("volumes") or []
+                    eips = event.get("eips") or []
+                    msg = f"Approve cleanup of Volumes: {_fmt(vols)} and EIPs: {_fmt(eips)}?"
+                    return {"ApprovalText": msg[:4096]}
+            outputs:
+              - Name: ApprovalText
+                Selector: "$.Payload.ApprovalText"
+                Type: String
+
+          # Human approval gate (sends 'approval needed' email via NotificationArn)
+          - name: ApproveDeletion
+            action: aws:approve
+            inputs:
+              Approvers:
+                - "{{ Approver }}"
+              MinRequiredApprovals: 1
+              Message: "{{ BuildApprovalMessage.ApprovalText }}"
+              NotificationArn:
+                Ref: CostGovernanceAlerts
+
+          # Execute cleanup (idempotent on empty lists)
+          - name: DeleteResources
+            action: aws:executeScript
+            inputs:
+              Runtime: python3.11
+              Handler: cleanup_handler
+              InputPayload:
+                volumes: "{{ DiscoverTargets.VolumeIds }}"
+                eips: "{{ DiscoverTargets.EipAllocationIds }}"
+              Script: |
+                import boto3
+                def cleanup_handler(event, context):
+                    ec2 = boto3.client('ec2')
+                    results = []
+
+                    for vol in (event.get('volumes') or []):
+                        try:
+                            ec2.delete_volume(VolumeId=vol)
+                            results.append(f"Deleted volume: {vol}")
+                        except Exception as e:
+                            results.append(f"Failed volume {vol}: {str(e)}")
+
+                    for eip in (event.get('eips') or []):
+                        try:
+                            ec2.release_address(AllocationId=eip)
+                            results.append(f"Released EIP: {eip}")
+                        except Exception as e:
+                            results.append(f"Failed EIP {eip}: {str(e)}")
+
+                    return {"status": "completed", "details": results}
+
+          # Completion notification (also covered by EventBridge follow-up statuses)
+          - name: NotifySuccess
+            action: aws:executeAwsApi
+            inputs:
+              Service: sns
+              Api: Publish
+              TopicArn:
+                Fn::Sub: >-
+                  arn:aws:sns:${AWS::Region}:${AWS::AccountId}:Automation-CostGovernanceAlerts
+              Message: >
+                Cleanup completed for unattached Volumes and EIPs. Check details
+                in the Automation execution output.
+
+  # EventBridge: send follow-up emails after approval decision / run completion
+  ApprovalFollowupRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: CostGovernance-ApprovalFollowup
+      Description: Notify via SNS when Automation execution is Approved/Rejected/Success/Failed/TimedOut
+      EventPattern:
+        source:
+          - aws.ssm
+        detail-type:
+          - EC2 Automation Execution Status-change Notification
+        detail:
+          Definition:
+            - CostGovernance-Cleanup
+          Status:
+            - Approved
+            - Rejected
+            - Success
+            - Failed
+            - TimedOut
+      Targets:
+        - Id: SnsTarget
+          Arn:
+            Ref: CostGovernanceAlerts
+          InputTransformer:
+            InputPathsMap:
+              exec:  $.detail.ExecutionId
+              status: $.detail.Status
+              doc:   $.detail.Definition
+              region: $.region
+            InputTemplate: |
+              "Automation update: <doc> is <status> for execution <exec>. Open SSM: https://<region>.console.aws.amazon.com/systems-manager/automation/execution/<exec>?region=<region>"
+
+Outputs:
+  AlertsTopicArn:
+    Description: SNS topic ARN for Cost Governance alerts (approval + notifications)
+    Value:
+      Ref: CostGovernanceAlerts
+
+  ApprovalFollowupRuleArn:
+    Description: EventBridge rule ARN for follow-up status notifications
+    Value:
+      Fn::GetAtt:
+        - ApprovalFollowupRule
+        - Arn
+
+  AutomationRoleArn:
+    Description: ARN of the SSM Automation execution role
+    Value:
+      Fn::GetAtt:
+        - AutomationExecutionRole
+        - Arn
+
+  CleanupDocumentName:
+    Description: SSM Automation document name for cleanup
+    Value:
+      Ref: CleanupAutomationDocument

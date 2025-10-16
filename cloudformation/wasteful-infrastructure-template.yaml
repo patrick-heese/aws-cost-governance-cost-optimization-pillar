@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Simple wasteful infrastructure for Cloud Cost Governance project (with S3 BucketPolicy)
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Select your VPC
+
+  SubnetId1:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select any public subnet
+
+  SubnetId2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select another public subnet (different AZ for Instance 2)
+    
+  LatestAl2023Ami:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+
+Resources:
+  # Simple Security Group
+  SimpleSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Simple security group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Project
+          Value: CostGovernance
+
+  # Oversized EC2 Instance 1
+  OversizedInstance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.small
+      ImageId: !Ref LatestAl2023Ami
+      SubnetId: !Ref SubnetId1
+      SecurityGroupIds:
+        - !Ref SimpleSecurityGroup
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          echo "<h1>Oversized Instance 1 - t3.small</h1>" > /var/www/html/index.html
+          echo "<p>Should be t3.micro - Still wasting ~$15/month</p>" >> /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: CostGovernance-Oversized1
+        - Key: Project
+          Value: CostGovernance
+        - Key: CostOptimization
+          Value: Oversized instance
+
+  # Oversized EC2 Instance 2 - Using different subnet
+  OversizedInstance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      ImageId: !Ref LatestAl2023Ami
+      SubnetId: !Ref SubnetId2
+      SecurityGroupIds:
+        - !Ref SimpleSecurityGroup
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          echo "<h1>Oversized Instance 2 - t3.medium</h1>" > /var/www/html/index.html
+          echo "<p>Should be t3.micro - Still wasting ~$25/month</p>" >> /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: CostGovernance-Oversized2
+        - Key: Project
+          Value: CostGovernance
+        - Key: CostOptimization
+          Value: Oversized instance
+
+  # Unattached EBS Volumes - distribute across both AZs
+  UnattachedVolume1:
+    Type: AWS::EC2::Volume
+    Properties:
+      Size: 50
+      AvailabilityZone: !GetAtt OversizedInstance1.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: CostGovernance-UnattachedVolume1
+        - Key: Project
+          Value: CostGovernance
+        - Key: CostOptimization
+          Value: Unattached volume
+
+  UnattachedVolume2:
+    Type: AWS::EC2::Volume
+    Properties:
+      Size: 50
+      AvailabilityZone: !GetAtt OversizedInstance2.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: CostGovernance-UnattachedVolume2
+        - Key: Project
+          Value: CostGovernance
+        - Key: CostOptimization
+          Value: Unattached volume
+
+  UnattachedVolume3:
+    Type: AWS::EC2::Volume
+    Properties:
+      Size: 100
+      AvailabilityZone: !GetAtt OversizedInstance1.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: CostGovernance-UnattachedVolume3
+        - Key: Project
+          Value: CostGovernance
+        - Key: CostOptimization
+          Value: Unattached volume
+
+  # Unattached Elastic IPs
+  UnattachedEIP1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: CostGovernance-UnattachedEIP1
+        - Key: Project
+          Value: CostGovernance
+
+  UnattachedEIP2:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: CostGovernance-UnattachedEIP2
+        - Key: Project
+          Value: CostGovernance
+
+  # S3 Bucket for Frontend (public website for demo)
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'costgovernance-frontend-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      Tags:
+        - Key: Project
+          Value: CostGovernance
+        - Key: CostOptimization
+          Value: No lifecycle policy
+
+  # Public read BucketPolicy for static website (demo only)
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub arn:aws:s3:::${FrontendBucket}/*
+
+Outputs:
+  Instance1IP:
+    Description: Public IP of Instance 1
+    Value: !GetAtt OversizedInstance1.PublicIp
+
+  Instance2IP:
+    Description: Public IP of Instance 2
+    Value: !GetAtt OversizedInstance2.PublicIp
+
+  S3WebsiteURL:
+    Description: S3 Website URL for manual frontend upload
+    Value: !GetAtt FrontendBucket.WebsiteURL
+
+  S3BucketName:
+    Description: S3 Bucket Name for uploading index.html
+    Value: !Ref FrontendBucket
+
+  PostDeploymentSteps:
+    Description: Manual steps needed after deployment
+    Value: "1. Upload index.html to S3 bucket 2. Website should be reachable via S3 Website URL"
+
+  TotalEstimatedCost:
+    Description: Estimated monthly cost
+    Value: "$30-40/month (2x t3.* + EBS volumes + EIPs)"
