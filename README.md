@@ -1,23 +1,23 @@
-# Automated Cost Governance on AWS (Cost Optimization Pillar)
+# Automated Cost Governance on AWS (Cost Optimization Pillar)  
 A **cost-focused** workflow that intentionally deploys a small set of **wasteful resources** and then uses **governed automation** to eliminate **100% waste** (unattached **EBS** volumes, unassociated **EIPs**) with **human approval** and **least-privilege** IAM. Insights from **CloudWatch**, **Cost Explorer**, and **Trusted Advisor** guide decisions; **Compute Optimizer** is optional for rightsizing after 14+ days. Post-approval status emails are sent via **EventBridge**.  
 
-## Architecture Overview
+## Architecture Overview  
 ![Architecture Diagram](assets/architecture-diagram.png)  
 *Figure 1: Automated Cost Governance - Cost Optimization Focused Architecture*  
 
-**Legend (callouts)**  
-1. **Tag-driven visibility & control** – Use `Project=CostGovernance` to group spend in **Cost Explorer** and restrict deletions via IAM conditions (e.g., `ec2:ResourceTag/Project`).  
-2. **Eliminate 100% waste** – Target **unattached EBS** and **unassociated EIPs** for immediate, zero-risk savings.  
-3. **Measure → act → verify** – Baseline with **CloudWatch**, decide, then verify savings later in **Cost Explorer**.  
+### Legend (callouts)  
+1. **Tag-driven visibility & control** - Use `Project=CostGovernance` to group spend in **Cost Explorer** and restrict deletions via IAM conditions (e.g., `ec2:ResourceTag/Project`).  
+2. **Eliminate 100% waste** - Target **unattached EBS** and **unassociated EIPs** for immediate, zero-risk savings.  
+3. **Measure → act → verify** - Baseline with **CloudWatch**, decide, then verify savings later in **Cost Explorer**.  
 4. **Governed automation & least-privilege** - **SSM runbook** with `aws:approve` gate; execution role limited to `ec2:Describe*`, `ec2:DeleteVolume` (**tag-scoped to** `Project=CostGovernance`), `ec2:ReleaseAddress`, and `sns:Publish`.  
     - **Approval email path:** `aws:approve` uses `NotificationArn` → **SNS** (topic must start with `Automation-`, e.g., `Automation-CostGovernanceAlerts`).  
     - **Approver access (read-only):** at minimum `ssm:SendAutomationSignal`, `ssm:GetAutomationExecution`, `ssm:DescribeAutomationStepExecutions` (or attach `AmazonSSMReadOnlyAccess`).  
 5. **Rightsizing guidance - Compute Optimizer** (optional, 14+ days) for EC2 rightsizing/modernization (e.g., t3.small → t3.micro/Graviton/Spot).  
-6. **Data lifecycle** – Add an **S3 lifecycle** rule (30 → Standard-IA, 90 → Glacier) as a manual console step.  
+6. **Data lifecycle** - Add an **S3 lifecycle** rule (30 → Standard-IA, 90 → Glacier) as a manual console step.  
 
 > **Solid** arrows = action/API (automation, provisioning, human approval). **Dashed** arrows = telemetry/insight (metrics, cost, checks, execution events).  
  
-## Skills Applied
+## Skills Applied  
 - Designing a cost optimization architecture (**tag-driven control, governed automation, human approval**).  
 - Implementing least-privilege IAM (**tag-scoped** `ec2:DeleteVolume`, `ec2:ReleaseAddress`, `sns:Publish`, `ec2:Describe*`).  
 - Automating cleanup with **SSM Automation (discover → approve → delete EBS / release EIPs)**.  
@@ -40,7 +40,7 @@ A **cost-focused** workflow that intentionally deploys a small set of **wasteful
 - **Other Tools:** AWS CLI  
 
 ## Deployment Instructions  
-> **Note:** All command-line examples use `bash` syntax highlighting to maximize compatibility and readability. If you are using PowerShell or Command Prompt on Windows, the commands remain the same but prompt styles may differ.  
+> **Note:** Many commands are identical across shells; the main differences are line continuation (PowerShell: `` ` `` • Bash: `\` • cmd.exe: `^`), environment variables (PowerShell: `$env:NAME=...` • Bash: `NAME=...` • cmd.exe: `set NAME=...`), and path separators.  
   
 ### CloudFormation  
 1. Clone this repository.  
@@ -84,7 +84,7 @@ A **cost-focused** workflow that intentionally deploys a small set of **wasteful
 	--capabilities CAPABILITY_NAMED_IAM
 	```
 
-**Note:** Ensure the AWS CLI is configured (`aws configure`) with credentials that have sufficient permissions to manage **S3**, **EC2**, **EBS**, **Elastic IPs**, **SNS**, **SSM**, **EventBridge**, **Security Groups**, and **IAM resources**.  
+> **Note**: Ensure the AWS CLI user (`aws configure`) or CloudFormation assumed role has sufficient permissions to manage **S3**, **EC2**, **EBS**, **Elastic IPs**, **SNS**, **SSM**, **EventBridge**, **Security Groups**, and **IAM resources**.  
 
 ## How to Use (Validate Cost Behaviors)  
 1. **Baseline in CloudWatch (metrics)**  
@@ -104,7 +104,7 @@ A **cost-focused** workflow that intentionally deploys a small set of **wasteful
 	- Review instance recommendations (e.g., **t3.small → t3.micro/Graviton/Spot**).  
 	- Purpose: plan post-cleanup rightsizing; do **not** block zero-risk cleanup on this.  
 5. **Human review → Execute runbook (decision gate)**  
-	- Console → **Systems Manager** → **Automation** → **Execute automation** → Owned by me → **CostGovernance-Cleanup** → **Execute**
+	- Console → **Systems Manager** → **Automation** → **Execute automation** → Owned by me → **CostGovernance-Cleanup** → **Execute**  
 	- If unattached **EBS** / unassociated **EIPs** are present, proceed to governed cleanup.  
 	- Console → Systems Manager → Automation → CostGovernance-Cleanup → Execute  
 		- `AutomationAssumeRole`: defaults to stack role  
@@ -126,21 +126,21 @@ A **cost-focused** workflow that intentionally deploys a small set of **wasteful
 ## Project Structure  
 ```plaintext
 aws-cost-governance-cost-optimization-pillar
-├── assets/                              		# Images, diagrams, screenshots
-│   ├── architecture-diagram.png        	 	# Project architecture diagram
-│   ├── application-screenshot.png      	 	# Minimal application screenshot
-│   ├── approval-needed-email.png				# Approval notification
-│   └── automation-status-email.png				# Status notification
-├── cloudformation/                      		# CloudFormation templates
+├── assets/                                     # Images, diagrams, screenshots
+│   ├── architecture-diagram.png                # Project architecture diagram
+│   ├── application-screenshot.png              # Minimal application screenshot
+│   ├── approval-needed-email.png               # Approval notification
+│   └── automation-status-email.png             # Status notification
+├── cloudformation/                             # CloudFormation templates
 │   ├── wasteful-infrastructure-template.yaml   # Optional stack (wasteful footprint)
-│   ├── params1.json                      		# Parameter values for optional stack
-│   ├──cost-governance-automation.yaml      	# Required stack (runbook, IAM, SNS, EventBridge)
-│   └── params2.json                      		# Parameter values for required stack
-├── src/                                 		# Website files
-│   └── index.html                       		# Default web page
-├── LICENSE
-├── README.md
-└── .gitignore
+│   ├── params1.json                            # Parameter values for optional stack
+│   ├──cost-governance-automation.yaml          # Required stack (runbook, IAM, SNS, EventBridge)
+│   └── params2.json                            # Parameter values for required stack
+├── src/                                        # Website files
+│   └── index.html                              # Default web page
+├── LICENSE                                     
+├── README.md                                   
+└── .gitignore                                  
 ```  
 
 ## Screenshot  
@@ -174,4 +174,4 @@ Cloud Administrator | Aspiring Cloud Engineer/Architect
 This project was inspired by a course from [techwithlucy](https://github.com/techwithlucy).  
 The static website HTML page was taken directly from the course author's original implementation.  
 The architecture diagram included here is my own version, adapted from the original course diagram.  
-I designed and developed all Infrastructure-as-Code (CloudFormation) and project documentation.  
+I designed and developed all Infrastructure as Code (CloudFormation) and project documentation.  

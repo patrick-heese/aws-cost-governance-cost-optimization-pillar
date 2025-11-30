@@ -93,6 +93,8 @@ Resources:
   # Unattached EBS Volumes - distribute across both AZs
   UnattachedVolume1:
     Type: AWS::EC2::Volume
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     Properties:
       Size: 50
       AvailabilityZone: !GetAtt OversizedInstance1.AvailabilityZone
@@ -106,6 +108,8 @@ Resources:
 
   UnattachedVolume2:
     Type: AWS::EC2::Volume
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     Properties:
       Size: 50
       AvailabilityZone: !GetAtt OversizedInstance2.AvailabilityZone
@@ -119,6 +123,8 @@ Resources:
 
   UnattachedVolume3:
     Type: AWS::EC2::Volume
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     Properties:
       Size: 100
       AvailabilityZone: !GetAtt OversizedInstance1.AvailabilityZone
@@ -182,7 +188,7 @@ Resources:
             Effect: Allow
             Principal: "*"
             Action: s3:GetObject
-            Resource: !Sub arn:aws:s3:::${FrontendBucket}/*
+            Resource: !Sub arn:${AWS::Partition}:s3:::${FrontendBucket}/*
 
 Outputs:
   Instance1IP:

@@ -15,7 +15,7 @@ Parameters:
     Type: String
     Default: ''
     Description: (Optional) Email to subscribe to the Automation-CostGovernanceAlerts SNS topic.
-    AllowedPattern: >-
+    AllowedPattern: >
       ^$|^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$
 
   ProjectTagValue:
@@ -265,7 +265,7 @@ Resources:
               Api: Publish
               TopicArn:
                 Fn::Sub: >-
-                  arn:aws:sns:${AWS::Region}:${AWS::AccountId}:Automation-CostGovernanceAlerts
+                  arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:Automation-CostGovernanceAlerts
               Message: >
                 Cleanup completed for unattached Volumes and EIPs. Check details
                 in the Automation execution output.
